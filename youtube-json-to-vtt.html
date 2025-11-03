@@ -46,121 +46,114 @@
 </div>
 
 <script>
-  const drop = document.getElementById('drop');
-  const fileInput = document.getElementById('file');
-  const out = document.getElementById('out');
-  const dl = document.getElementById('download');
-  const copyBtn = document.getElementById('copy');
-  const stats = document.getElementById('stats');
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+const out = document.getElementById('out');
+const dl = document.getElementById('download');
+const copyBtn = document.getElementById('copy');
+const stats = document.getElementById('stats');
 
-  // drag & drop visuals
-  ['dragenter','dragover'].forEach(ev =>
-    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('dragover'); })
-  );
-  ['dragleave','drop'].forEach(ev =>
-    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('dragover'); })
-  );
-  drop.addEventListener('drop', e => {
-    const f = e.dataTransfer.files && e.dataTransfer.files[0];
-    if (f) handleFile(f);
-  });
-  fileInput.addEventListener('change', e => {
-    const f = e.target.files && e.target.files[0];
-    if (f) handleFile(f);
-  });
+// drag & drop visuals
+['dragenter','dragover'].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('dragover'); })
+);
+['dragleave','drop'].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('dragover'); })
+);
+drop.addEventListener('drop', e => {
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+fileInput.addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (f) handleFile(f);
+});
 
-  function handleFile(file) {
-    const reader = new FileReader();
-    reader.onerror = () => alert('Could not read file.');
-    reader.onload = () => {
-      try {
-        const json = JSON.parse(reader.result);
-        const { vtt, cueCount, durationMs } = jsonToVtt(json);
-        out.value = vtt;
-        // prepare download link
-        const blob = new Blob([vtt], { type: 'text/vtt' });
-        const url = URL.createObjectURL(blob);
-        dl.href = url;
-        dl.download = (file.name.replace(/\.[^.]+$/, '') || 'captions') + '.vtt';
-        dl.hidden = false;
-        copyBtn.hidden = false;
-        stats.textContent = `${cueCount} cues · ${formatMs(durationMs)} total`;
-      } catch (err) {
-        console.error(err);
-        alert('Sorry — that JSON was not recognized. It should look like YouTube captions with an "events" array.');
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  copyBtn.addEventListener('click', async () => {
+function handleFile(file) {
+  const reader = new FileReader();
+  reader.onerror = () => alert('Could not read file.');
+  reader.onload = () => {
     try {
-      await navigator.clipboard.writeText(out.value);
-      copyBtn.textContent = 'Copied!';
-      setTimeout(() => copyBtn.textContent = 'Copy to clipboard', 1200);
-    } catch {
-      alert('Could not copy to clipboard.');
+      const json = JSON.parse(reader.result);
+      const { vtt, cueCount, skipped, durationMs } = jsonToVtt(json);
+      out.value = vtt;
+      const blob = new Blob([vtt], { type: 'text/vtt' });
+      const url = URL.createObjectURL(blob);
+      dl.href = url;
+      dl.download = (file.name.replace(/\.[^.]+$/, '') || 'captions') + '.vtt';
+      dl.hidden = false;
+      copyBtn.hidden = false;
+      stats.textContent = `${cueCount} cues · ${skipped} blank removed · ${formatMs(durationMs)} total`;
+    } catch (err) {
+      console.error(err);
+      alert('That JSON was not recognized (needs an "events" array).');
     }
-  });
+  };
+  reader.readAsText(file);
+}
 
-  // ---- Conversion ----
-  function jsonToVtt(data) {
-    // Supports YouTube's JSON: { events: [{ tStartMs, dDurationMs, segs: [{utf8}] } ...] }
-    if (!data || !Array.isArray(data.events)) throw new Error('No events[] array');
+copyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(out.value);
+    copyBtn.textContent = 'Copied!';
+    setTimeout(() => copyBtn.textContent = 'Copy to clipboard', 1200);
+  } catch {
+    alert('Could not copy.');
+  }
+});
 
-    let lines = ['WEBVTT', ''];
-    let cueCount = 0;
-    let lastEnd = 0;
+// ---- Conversion ----
+function jsonToVtt(data) {
+  if (!data || !Array.isArray(data.events)) throw new Error('No events[] array');
 
-    for (const ev of data.events) {
-      const start = toNumber(ev.tStartMs);
-      const dur = toNumber(ev.dDurationMs);
-      if (start == null || dur == null) continue;
+  let lines = ['WEBVTT', ''];
+  let cueCount = 0, skipped = 0, lastEnd = 0;
 
-      const end = start + dur;
-      const text = extractText(ev);
-      cueCount++;
+  for (const ev of data.events) {
+    const start = toNumber(ev.tStartMs);
+    const dur = toNumber(ev.dDurationMs);
+    if (start == null || dur == null) continue;
 
-      lines.push(String(cueCount));
-      lines.push(timecode(start) + ' --> ' + timecode(end));
-      lines.push(text || '');  // empty allowed
-      lines.push('');          // blank line between cues
-      lastEnd = Math.max(lastEnd, end);
-    }
+    const end = start + dur;
+    const text = extractText(ev).trim();
 
-    return { vtt: lines.join('\n'), cueCount, durationMs: lastEnd };
+    if (!text) { skipped++; continue; }  // skip blank cues
+
+    cueCount++;
+    lines.push(String(cueCount));
+    lines.push(timecode(start) + ' --> ' + timecode(end));
+    lines.push(text);
+    lines.push('');
+    lastEnd = Math.max(lastEnd, end);
   }
 
-  function extractText(ev) {
-    // Most YouTube JSON stores text in segs[].utf8 (may contain embedded newlines)
-    if (Array.isArray(ev.segs)) {
-      return ev.segs.map(s => (s && s.utf8) ? s.utf8 : '').join('');
-    }
-    // Fallbacks for other shapes you might encounter:
-    if (typeof ev.text === 'string') return ev.text;
-    if (typeof ev.utf8 === 'string') return ev.utf8;
-    return '';
-  }
+  return { vtt: lines.join('\n'), cueCount, skipped, durationMs: lastEnd };
+}
 
-  function toNumber(x) {
-    const n = Number(x);
-    return Number.isFinite(n) ? n : null;
-  }
+function extractText(ev) {
+  if (Array.isArray(ev.segs)) return ev.segs.map(s => s?.utf8 ?? '').join('');
+  if (typeof ev.text === 'string') return ev.text;
+  if (typeof ev.utf8 === 'string') return ev.utf8;
+  return '';
+}
 
-  function timecode(ms) {
-    // hh:mm:ss.mmm
-    const h = Math.floor(ms / 3600000);
-    const m = Math.floor((ms % 3600000) / 60000);
-    const s = Math.floor((ms % 60000) / 1000);
-    const f = Math.floor(ms % 1000);
-    return `${pad(h)}:${pad(m)}:${pad(s)}.${String(f).padStart(3,'0')}`;
-  }
+function toNumber(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+}
 
-  function pad(n){ return String(n).padStart(2,'0'); }
+function timecode(ms) {
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const f = Math.floor(ms % 1000);
+  return `${pad(h)}:${pad(m)}:${pad(s)}.${String(f).padStart(3,'0')}`;
+}
 
-  function formatMs(ms) {
-    const sec = Math.round(ms/1000);
-    const m = Math.floor(sec/60), s = sec%60;
-    return `${m}:${String(s).padStart(2,'0')}`;
-  }
+function pad(n){ return String(n).padStart(2,'0'); }
+function formatMs(ms) {
+  const sec = Math.round(ms/1000);
+  const m = Math.floor(sec/60), s = sec%60;
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
 </script>
